@@ -11,9 +11,21 @@ PREFIX = "!"
 
 # Setup logging
 logger = logging.getLogger("discord")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
 
 # Load the environment variables
 load_dotenv()
+token = os.getenv('DISCORD_TOKEN')
+
+if token is None:
+    logger.error("No token found! Make sure DISCORD_TOKEN is set in your .env file")
+    exit(1)
 
 # Create the bot with all intents
 # The message content and members intent must be enabled in the Discord Developer Portal for the bot to work.
@@ -24,10 +36,9 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 probe_agent = ProbeAgent()
 answer_agent = AnswerAgent()
 
-
-# Get the token from the environment variables
-token = os.getenv("DISCORD_TOKEN")
+# At the top with other constants
 response_channel_id = 1337581994648932363
+rankings_channel_id = 1337904418603008051  
 
 @bot.event
 async def on_ready():
@@ -38,6 +49,7 @@ async def on_ready():
     https://discordpy.readthedocs.io/en/latest/api.html#discord.on_ready
     """
     logger.info(f"{bot.user} has connected to Discord!")
+    sort_forum_by_reactions.start()  # Start the sorting task
 
 
 @bot.event
@@ -122,41 +134,77 @@ async def on_message(question: discord.Message):
 
 # Tasks
 
-""" # TODO - Get this working
-@tasks.loop(minutes=0.5)
+@tasks.loop(minutes=2)
 async def sort_forum_by_reactions():
-    # Get the forum channel by ID
+    logger.info("Starting forum sort task...")
     forum_channel = bot.get_channel(response_channel_id)
+    rankings_channel = bot.get_channel(rankings_channel_id)
 
-    # Ensure we are working with a Forum Channel
-    if isinstance(forum_channel, discord.ForumChannel):
-        print("in is instance, should be sorting")
-        # Fetch all the messages from the forum channel (this may take some time for large forums)
-        all_messages = []
-        async for message in forum_channel.history(limit=None):  # Fetch all messages, no limit
-            all_messages.append(message)
+    if not isinstance(forum_channel, discord.ForumChannel):
+        logger.error("The channel is not a forum channel.")
+        return
 
-        # Create a list of tuples (message, number of reactions)
-        message_reactions = []
+    try:
+        # Get and fetch all threads (both active and archived)
+        archived_threads = []
+        async for thread in forum_channel.archived_threads():
+            archived_threads.append(thread)
+            
+        active_threads = forum_channel.threads
+        all_threads = list(active_threads) + archived_threads
+        
+        logger.info(f"Found {len(all_threads)} threads")
+        thread_reactions = []
 
-        for message in all_messages:
-            # Count the number of reactions on the message
-            num_reactions = sum([reaction.count for reaction in message.reactions])
-            message_reactions.append((message, num_reactions))
+        # Process each thread
+        for thread in all_threads:
+            try:
+                if hasattr(thread, 'starter_message') and thread.starter_message:
+                    # Use the starter message if available
+                    first_message = thread.starter_message
+                else:
+                    # Otherwise fetch the first message
+                    async for message in thread.history(limit=1, oldest_first=True):
+                        first_message = message
+                        break
+                
+                reaction_count = sum(reaction.count for reaction in first_message.reactions) if first_message.reactions else 0
+                thread_reactions.append((thread, reaction_count))
+                logger.info(f"Thread '{thread.name}' (ID: {thread.id}) has {reaction_count} reactions")
+            except Exception as thread_error:
+                logger.error(f"Error processing thread '{thread.name}': {thread_error}")
 
-        # Sort messages by the number of reactions (highest first)
-        sorted_messages = sorted(message_reactions, key=lambda x: x[1], reverse=True)
+        if not thread_reactions:
+            logger.warning("No threads with reactions found")
+            return
 
-        # Send the top 10 messages with the most reactions (adjust the number as needed)
-        response = "Here are the top 10 messages sorted by reactions:\n"
-        for i, (message, reactions) in enumerate(sorted_messages[:10], start=1):
-            response += f"{i}. {message.content} (Reactions: {reactions})\n"
+        # Sort threads by reaction count
+        sorted_threads = sorted(thread_reactions, key=lambda x: x[1], reverse=True)
+        
+        # Create rankings message
+        rankings = "# 🏆 Most Popular Questions\n\n"
+        for i, (thread, reaction_count) in enumerate(sorted_threads[:10], 1):
+            rankings += f"{i}. [{thread.name}](<{thread.jump_url}>) - {reaction_count} 👍\n"
+        
+        rankings += "\n*Rankings update every 2 minutes*"
 
-        # Send the sorted messages to the forum channel or a designated channel
-        await forum_channel.send(response)
-    else:
-        print("The channel is not a forum channel.")
-"""
+        # Find existing rankings message
+        existing_message = None
+        async for message in rankings_channel.history(limit=10):
+            if message.author == bot.user and "Most Popular Questions" in message.content:
+                existing_message = message
+                break
+
+        # Update or create rankings message
+        if existing_message:
+            await existing_message.edit(content=rankings)
+            logger.info("Updated rankings message")
+        else:
+            await rankings_channel.send(rankings)
+            logger.info("Created new rankings message")
+                
+    except Exception as e:
+        logger.error(f"Error in sort_forum_by_reactions: {e}")
 
 
 # Commands
