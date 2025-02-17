@@ -48,22 +48,23 @@ rankings_channel_id = 1337904418603008051
 previous_questions = []
 
 # Function to check for similar questions
-# Function to check for similar questions
-def find_similar_questions(new_question, threshold=0.7):
+def find_similar_questions(new_question, threshold=0.5):
     logger.info("Finding similar questions for: %s", new_question)
     
     # Combine the new question with previous questions
-    all_questions = previous_questions + [new_question]
     
-    print(previous_questions)
+    logger.info("All questions for similarity check: %s", previous_questions)  # Debugging line
 
-    
     # Create a TF-IDF Vectorizer
-    vectorizer = TfidfVectorizer().fit_transform(all_questions)
+    vectorizer = TfidfVectorizer().fit_transform(previous_questions + [new_question])
     vectors = vectorizer.toarray()
+    
+    logger.info("TF-IDF Vectors: %s", vectors)  # Debugging line
     
     # Calculate cosine similarity
     cosine_sim = cosine_similarity(vectors)
+    
+    logger.info("Cosine Similarity Matrix: %s", cosine_sim)  # Debugging line
     
     # Get the similarity scores for the new question
     similar_indices = cosine_sim[-1][:-1]  # Exclude the last entry (the new question itself)
@@ -83,10 +84,41 @@ async def on_ready():
     """
     Called when the client is done preparing the data received from Discord.
     Prints message on terminal when bot successfully connects to discord.
-
-    https://discordpy.readthedocs.io/en/latest/api.html#discord.on_ready
     """
     logger.info(f"{bot.user} has connected to Discord!")
+
+    # Fetch the response channel
+    response_channel = bot.get_channel(response_channel_id)
+    
+    if response_channel is None:
+        logger.error(f"Could not find response channel with ID {response_channel_id}")
+        return
+
+    logger.info(f"Channel found: {response_channel.name} (ID: {response_channel.id}, Type: {type(response_channel)})")
+
+    if isinstance(response_channel, discord.ForumChannel):
+        logger.info(f"Fetching threads from forum channel: {response_channel.name}")
+        
+        # Fetch all active threads in the forum channel
+        try:
+            # Fetch active threads
+            for thread in response_channel.threads:
+                async for message in thread.history(limit=None):  # Fetch all messages in the thread
+                    if not message.author.bot:  # Ignore messages from bots
+                        previous_questions.append(message.content)  # Add the question to the list
+                        logger.info("Added to previous questions: %s", message.content)  # Debugging line
+
+            # Fetch archived threads
+            async for thread in response_channel.archived_threads():  # Iterate over the async generator
+                async for message in thread.history(limit=None):  # Fetch all messages in the thread
+                    if not message.author.bot:  # Ignore messages from bots
+                        previous_questions.append(message.content)  # Add the question to the list
+                        logger.info("Added to previous questions: %s", message.content)  # Debugging line
+
+        except Exception as e:
+            logger.error(f"Error fetching messages from forum channel: {e}")
+    else:
+        logger.error(f"The channel with ID {response_channel_id} is not a forum channel. It is of type: {type(response_channel)}.")
 
 
 @bot.event
@@ -104,20 +136,14 @@ async def on_message(question: discord.Message):
         return
 
     # Process the message with the agent you wrote
-    # Open up the agent.py file to customize the agent
     logger.info(f"Processing message from {question.author}: {question.content}")
 
     
 
-    async def post_question():
-        # Check for similar questions
-        similar_questions = find_similar_questions(question.content)
-        
-        if similar_questions:
-            # Present the user with similar questions
-            await question.reply(f"Here are some similar questions you might find helpful:\n" + "\n".join(similar_questions))
-        else:
-            # Send the response to the Q&A channel as a new thread
+    async def post_question_flow():
+
+        # Send the response to the Q&A channel as a new thread
+        async def post_question(tags: list[discord.Object] = None):
             forum_channel = bot.get_channel(response_channel_id)
             if forum_channel and isinstance(forum_channel, discord.ForumChannel):
                 # Create a thread title from the first 100 characters of the original message
@@ -126,15 +152,112 @@ async def on_message(question: discord.Message):
                 # Create a new thread in the forum
                 thread = await forum_channel.create_thread(
                     name=thread_title,
-                    content=f"**Posted by {question.author.mention}**"
+                    content=f"**Posted by {question.author.mention}**",
+                    applied_tags=tags
                 )
                 await question.reply("Question posted!")
+
+                # Add the new question to the previous questions list
+                previous_questions.append(question.content)  # Add the new question to the list
+                logger.info("Updated previous questions: %s", previous_questions)  # Debugging line
             else:
                 logger.error(f"Could not find forum channel with ID {response_channel_id}")
                 await question.reply("Error: Could not find forum channel")
 
+        # Get tags before posting
+        async def get_question_tags():
+            forum_channel = bot.get_channel(response_channel_id)
+            if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
+                logger.error(f"Could not find forum channel with ID {response_channel_id}")
+                return []
 
+            available_tags = forum_channel.available_tags
+            if not available_tags:
+                logger.error(f"No tags found in forum channel with ID {response_channel_id}")
+                return []
 
+            # Create a view with select menu for tags
+            view = View()
+            
+            # Create select menu with available tags
+            select = discord.ui.Select(
+                placeholder="Choose tags for your question...",
+                min_values=0,
+                max_values=min(len(available_tags), 5),  # Discord allows up to 5 tags
+                options=[
+                    discord.SelectOption(
+                        label=tag.name,
+                        value=str(tag.id)
+                    ) for tag in available_tags
+                ]
+            )
+            
+            # Store the selected tags
+            selected_tags = []
+            
+            async def select_callback(interaction):
+                selected_tags.clear()
+                selected_tags.extend([discord.Object(id=int(tag_id)) for tag_id in select.values])
+                await interaction.response.send_message(
+                    f"Selected tags: {', '.join(tag.name for tag in available_tags if str(tag.id) in select.values)}",
+                    ephemeral=True
+                )
+            
+            select.callback = select_callback
+            view.add_item(select)
+            
+            # Add done button
+            done_button = Button(label="Done", style=discord.ButtonStyle.green)
+            
+            async def done_callback(interaction):
+                view.stop()
+                await interaction.response.defer()
+                
+            done_button.callback = done_callback
+            view.add_item(done_button)
+            
+            # Send message with tag selection
+            await question.reply("Please select tags for your question:", view=view)
+            
+            # Wait for the view to finish
+            await view.wait()
+            
+            return selected_tags
+
+        # Check for similar questions
+        similar_questions = find_similar_questions(question.content)
+        
+        if similar_questions:
+            # Present the user with similar questions and ask for confirmation
+            confirmation_message = (
+                f"Here are some similar questions you might find helpful:\n" +
+                "\n".join(similar_questions) +
+                "\n\nAre you sure you want to post your question?"
+            )
+            
+            # Create a view with buttons for confirmation
+            view = View()
+            confirm_button = Button(label="Yes, post it", style=discord.ButtonStyle.green, custom_id="confirm_post")
+            cancel_button = Button(label="No, cancel", style=discord.ButtonStyle.red, custom_id="cancel_post")
+            
+            async def confirm_callback(interaction):
+                await interaction.response.defer()  # Acknowledge the interaction
+                tags = await get_question_tags()
+                await post_question(tags)
+
+            async def cancel_callback(interaction):
+                await interaction.response.send_message("Your question has not been posted.", ephemeral=True)
+
+            confirm_button.callback = confirm_callback
+            cancel_button.callback = cancel_callback
+            view.add_item(confirm_button)
+            view.add_item(cancel_button)
+
+            # Send the confirmation message with buttons
+            await question.reply(confirmation_message, view=view)
+        else:
+            tags = await get_question_tags()
+            await post_question(tags)
 
     # TODO - Check if question is answerable by Mistral on internet
     probe_response = await probe_agent.run(question)
@@ -155,7 +278,7 @@ async def on_message(question: discord.Message):
             
         async def no_callback(interaction):
             await interaction.response.send_message("Okay, I won't search online.", ephemeral=True)
-            await post_question()
+            await post_question_flow()
             
         yes_button.callback = yes_callback
         no_button.callback = no_callback
@@ -165,7 +288,7 @@ async def on_message(question: discord.Message):
         # Send message with buttons
         await question.reply("I might be able to help with this. Would you like me to search online?", view=view)
     else:
-        await post_question()
+        await post_question_flow()
 
 
 
@@ -173,7 +296,7 @@ async def on_message(question: discord.Message):
 # Tasks
 
 @tasks.loop(minutes=2)
-async def sort_forum_by_reactions():
+async def sort_forum_by_reactions(speaker_tag: str = None):
     logger.info("Starting forum sort task...")
     forum_channel = bot.get_channel(response_channel_id)
     rankings_channel = bot.get_channel(rankings_channel_id)
@@ -195,8 +318,22 @@ async def sort_forum_by_reactions():
         active_threads = forum_channel.threads
         all_threads = list(active_threads) + archived_threads
         
-        logger.info(f"Found {len(all_threads)} threads")
+        logger.info(f"Found {len(all_threads)} total threads")
+
+        # Filter threads by speaker tag if provided
+        if speaker_tag:
+            filtered_threads = []
+            for thread in all_threads:
+                # Check if thread has the specified speaker tag
+                if any(tag.name == speaker_tag for tag in thread.applied_tags):
+                    filtered_threads.append(thread)
+            all_threads = filtered_threads
+
+        logger.info(f"Found {len(all_threads)} threads for speaker tag: {speaker_tag}")
+        
         thread_reactions = []
+
+        
 
         # Process each thread
         for thread in all_threads:
@@ -207,17 +344,17 @@ async def sort_forum_by_reactions():
                 # Get the starter message
                 logger.info(f"Has starter_message attribute: {hasattr(thread, 'starter_message')}")
 
-                # if hasattr(thread, 'starter_message') and thread.starter_message:
-                #     first_message = thread.starter_message
+                if hasattr(thread, 'starter_message') and thread.starter_message:
+                    first_message = thread.starter_message
                     
-                #     original_poster_citation = first_message.content if first_message else None
-                #     logger.info(f"First message content: {original_poster_citation}")
-                # else:
-                #     async for message in thread.history(limit=1, oldest_first=True):
-                #         first_message = message
-                #         break
-                messages = await thread.history(limit=1).flatten()
-                first_message = messages[0]
+                    original_poster_citation = first_message.content if first_message else None
+                else:
+                    async for message in thread.history(limit=1, oldest_first=True):
+                        first_message = message
+                        original_poster_citation = first_message.content if first_message else None
+                        break
+
+                logger.info(f"First message content: {first_message.content}")
                 
                 reaction_count = sum(reaction.count for reaction in first_message.reactions) if first_message.reactions else 0
                 thread_reactions.append((thread, reaction_count, original_poster_citation))
@@ -277,15 +414,19 @@ async def ping(ctx, *, arg=None):
     else:
         await ctx.send(f"Pong! Your argument was {arg}")
 
-@bot.command(name="startsort", help="Starts sorting forum posts by reactions")
-async def start_sorting(ctx):
+@bot.command(name="startsort", help="Starts sorting forum posts by reactions. Usage: !startsort <speaker_tag>")
+async def start_sorting(ctx, speaker_tag: str = None):
     try:
+        if not speaker_tag:
+            await ctx.send("Please provide a speaker tag. Usage: !startsort <speaker_tag>")
+            return
+            
         if sort_forum_by_reactions.is_running():
-            await ctx.send("Sorting is already running!")
+            await ctx.send(f"Sorting is already running for {speaker_tag}. To stop, use !stopsort.")
         else:
-            sort_forum_by_reactions.start()
-            await ctx.send("Started sorting forum posts by reactions. Updates every 2 minutes.")
-            logger.info("Forum sorting started by user command")
+            sort_forum_by_reactions.start(speaker_tag)
+            await ctx.send(f"Started sorting forum posts by reactions for speaker tag '{speaker_tag}'. Updates every 2 minutes.")
+            logger.info(f"Forum sorting started by user command for speaker tag: {speaker_tag}")
     except Exception as e:
         error_message = f"Error starting sort: {str(e)}"
         logger.error(error_message)
