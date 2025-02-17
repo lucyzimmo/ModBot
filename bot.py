@@ -7,7 +7,7 @@ import pytz  # You might need to install this: pip install pytz
 from discord.ext import commands, tasks
 from discord.ui import Button, View, Select
 from dotenv import load_dotenv
-from agent import ProbeAgent, AnswerAgent
+from agent import ProbeAndAnswerAgent
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -37,8 +37,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
 # Import the agents from the agent.py file
-probe_agent = ProbeAgent()
-answer_agent = AnswerAgent()
+probe_and_answer_agent = ProbeAndAnswerAgent()
 
 # At the top with other constants
 response_channel_id = 1337581994648932363
@@ -47,37 +46,101 @@ rankings_channel_id = 1337904418603008051
 # List to store previously asked questions
 previous_questions = []
 
-# Function to check for similar questions
-def find_similar_questions(new_question, threshold=0.5):
-    logger.info("Finding similar questions for: %s", new_question)
+def find_similar_questions(new_question, threshold=0.7):
+    if not previous_questions:  # If no previous questions, return empty list
+        logger.info("No previous questions found")
+        return []
     
-    # Combine the new question with previous questions
+    # Create TF-IDF vectors
+    vectorizer = TfidfVectorizer()
+    all_questions = previous_questions + [new_question]
+    tfidf_matrix = vectorizer.fit_transform(all_questions)
     
-    logger.info("All questions for similarity check: %s", previous_questions)  # Debugging line
+    # Calculate similarity with the new question
+    similarity_vector = cosine_similarity(tfidf_matrix[-1:], tfidf_matrix[:-1])[0]
+    
+    # Get similar questions above threshold
+    similar = [(q, score) for q, score in zip(previous_questions, similarity_vector) if score > threshold]
+    similar.sort(key=lambda x: x[1], reverse=True)
+    
+    return [q for q, _ in similar[:3]]  # Return top 3 similar questions
 
-    # Create a TF-IDF Vectorizer
-    vectorizer = TfidfVectorizer().fit_transform(previous_questions + [new_question])
-    vectors = vectorizer.toarray()
-    
-    logger.info("TF-IDF Vectors: %s", vectors)  # Debugging line
-    
-    # Calculate cosine similarity
-    cosine_sim = cosine_similarity(vectors)
-    
-    logger.info("Cosine Similarity Matrix: %s", cosine_sim)  # Debugging line
-    
-    # Get the similarity scores for the new question
-    similar_indices = cosine_sim[-1][:-1]  # Exclude the last entry (the new question itself)
-    
-    # Find questions that exceed the threshold
-    similar_questions = [
-        previous_questions[i] for i in range(len(similar_indices)) 
-        if similar_indices[i] > threshold
-    ]
-    
-    logger.info("Similar questions found: %s", similar_questions)
-    return similar_questions
+async def post_question_flow(message: discord.Message, answer_response: str = None):
+    async def post_question(tags: list[discord.Object] = None):
+        forum_channel = bot.get_channel(response_channel_id)
+        if forum_channel and isinstance(forum_channel, discord.ForumChannel):
+            thread_title = (message.content[:97] + "...") if len(message.content) > 100 else message.content
+            
+            # Create initial post content
+            post_content = f"**Question from {message.author.mention}:**\n{message.content}"
+            
+            # If there's an answer from Mistral, add it to the post
+            if answer_response and answer_response.lower() != "no":
+                post_content += f"\n\n**AI-Generated Answer:**\n{answer_response}"
+            
+            thread = await forum_channel.create_thread(
+                name=thread_title,
+                content=post_content,
+                applied_tags=tags
+            )
+            await message.reply("Question posted!")
+            
+            # Add to previous questions list
+            previous_questions.append(message.content)
+            logger.info("Updated previous questions: %s", previous_questions)
+        else:
+            logger.error(f"Could not find forum channel with ID {response_channel_id}")
+            await message.reply("Error: Could not find forum channel")
 
+    async def get_question_tags():
+        forum_channel = bot.get_channel(response_channel_id)
+        if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
+            logger.error(f"Could not find forum channel with ID {response_channel_id}")
+            return []
+
+        available_tags = forum_channel.available_tags
+        if not available_tags:
+            logger.error(f"No tags found in forum channel with ID {response_channel_id}")
+            return []
+
+        view = View(timeout=300)  # 5 minute timeout
+        select = Select(
+            placeholder="Choose tags for your question...",
+            min_values=0,
+            max_values=min(len(available_tags), 5),
+            options=[discord.SelectOption(label=tag.name, value=str(tag.id)) for tag in available_tags]
+        )
+        
+        selected_tags = []
+        
+        async def select_callback(interaction):
+            selected_tags.clear()
+            selected_tags.extend([discord.Object(id=int(tag_id)) for tag_id in select.values])
+            await interaction.response.send_message(
+                f"Selected tags: {', '.join(tag.name for tag in available_tags if str(tag.id) in select.values)}",
+                ephemeral=True
+            )
+        
+        select.callback = select_callback
+        view.add_item(select)
+        
+        done_button = Button(label="Done", style=discord.ButtonStyle.green)
+        
+        async def done_callback(interaction):
+            view.stop()
+            await interaction.response.defer()
+        
+        done_button.callback = done_callback
+        view.add_item(done_button)
+        
+        await message.reply("Please select tags for your question:", view=view)
+        await view.wait()
+        
+        return selected_tags
+
+    # Get tags and post the question
+    tags = await get_question_tags()
+    await post_question(tags)
 
 @bot.event
 async def on_ready():
@@ -122,173 +185,102 @@ async def on_ready():
 
 
 @bot.event
-async def on_message(question: discord.Message):
+async def on_message(message: discord.Message):
     """
     Called when a message is sent in any channel the bot can see.
 
     https://discordpy.readthedocs.io/en/latest/api.html#discord.on_message
     """
-    # Don't delete this line! It's necessary for the bot to process commands.
-    await bot.process_commands(question)
+    await bot.process_commands(message)
 
-    # Ignore messages from self or other bots to prevent infinite loops.
-    if question.author.bot or question.content.startswith("!"):
+    # Ignore bot messages and commands
+    if message.author.bot or message.content.startswith("!"):
         return
 
-    # Process the message with the agent you wrote
-    logger.info(f"Processing message from {question.author}: {question.content}")
+    logger.info("Received message from %s: %s", message.author, message.content)
 
+    # Step 1: Check for similar questions first
+    similar_questions = find_similar_questions(message.content)
     
-
-    async def post_question_flow():
-
-        # Send the response to the Q&A channel as a new thread
-        async def post_question(tags: list[discord.Object] = None):
-            forum_channel = bot.get_channel(response_channel_id)
-            if forum_channel and isinstance(forum_channel, discord.ForumChannel):
-                # Create a thread title from the first 100 characters of the original message
-                thread_title = (question.content[:97] + "...") if len(question.content) > 100 else question.content
+    if similar_questions:
+        view = View(timeout=300)
+        continue_button = Button(label="Continue with my question", style=discord.ButtonStyle.primary)
+        cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        
+        async def continue_callback(interaction):
+            await interaction.response.defer()
+            # Step 2: If user continues, check if agent can answer
+            answer_response = await probe_and_answer_agent.run(message)
+            
+            if answer_response.lower() != "no":
+                # Step 3: If there's an answer, display it and ask if they want to post
+                await message.reply(f"Here's what I found: {answer_response}")
                 
-                # Create a new thread in the forum
-                thread = await forum_channel.create_thread(
-                    name=thread_title,
-                    content=f"**Posted by {question.author.mention}**",
-                    applied_tags=tags
-                )
-                await question.reply("Question posted!")
+                # Ask if they want to post the question
+                post_view = View(timeout=300)
+                post_button = Button(label="Yes, post the question", style=discord.ButtonStyle.green)
+                dont_post_button = Button(label="No, don't post", style=discord.ButtonStyle.red)
 
-                # Add the new question to the previous questions list
-                previous_questions.append(question.content)  # Add the new question to the list
-                logger.info("Updated previous questions: %s", previous_questions)  # Debugging line
+                async def post_callback(interaction):
+                    await interaction.response.defer()
+                    await post_question_flow(message, answer_response)
+
+                async def dont_post_callback(interaction):
+                    await interaction.response.send_message("Okay, I won't post your question.", ephemeral=True)
+
+                post_button.callback = post_callback
+                dont_post_button.callback = dont_post_callback
+                post_view.add_item(post_button)
+                post_view.add_item(dont_post_button)
+
+                await message.reply("Do you want to post your question?", view=post_view)
             else:
-                logger.error(f"Could not find forum channel with ID {response_channel_id}")
-                await question.reply("Error: Could not find forum channel")
-
-        # Get tags before posting
-        async def get_question_tags():
-            forum_channel = bot.get_channel(response_channel_id)
-            if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
-                logger.error(f"Could not find forum channel with ID {response_channel_id}")
-                return []
-
-            available_tags = forum_channel.available_tags
-            if not available_tags:
-                logger.error(f"No tags found in forum channel with ID {response_channel_id}")
-                return []
-
-            # Create a view with select menu for tags
-            view = View()
-            
-            # Create select menu with available tags
-            select = discord.ui.Select(
-                placeholder="Choose tags for your question...",
-                min_values=0,
-                max_values=min(len(available_tags), 5),  # Discord allows up to 5 tags
-                options=[
-                    discord.SelectOption(
-                        label=tag.name,
-                        value=str(tag.id)
-                    ) for tag in available_tags
-                ]
-            )
-            
-            # Store the selected tags
-            selected_tags = []
-            
-            async def select_callback(interaction):
-                selected_tags.clear()
-                selected_tags.extend([discord.Object(id=int(tag_id)) for tag_id in select.values])
-                await interaction.response.send_message(
-                    f"Selected tags: {', '.join(tag.name for tag in available_tags if str(tag.id) in select.values)}",
-                    ephemeral=True
-                )
-            
-            select.callback = select_callback
-            view.add_item(select)
-            
-            # Add done button
-            done_button = Button(label="Done", style=discord.ButtonStyle.green)
-            
-            async def done_callback(interaction):
-                view.stop()
-                await interaction.response.defer()
-                
-            done_button.callback = done_callback
-            view.add_item(done_button)
-            
-            # Send message with tag selection
-            await question.reply("Please select tags for your question:", view=view)
-            
-            # Wait for the view to finish
-            await view.wait()
-            
-            return selected_tags
-
-        # Check for similar questions
-        similar_questions = find_similar_questions(question.content)
+                # If no answer, just proceed with posting
+                await post_question_flow(message)
         
-        if similar_questions:
-            # Present the user with similar questions and ask for confirmation
-            confirmation_message = (
-                f"Here are some similar questions you might find helpful:\n" +
-                "\n".join(similar_questions) +
-                "\n\nAre you sure you want to post your question?"
-            )
-            
-            # Create a view with buttons for confirmation
-            view = View()
-            confirm_button = Button(label="Yes, post it", style=discord.ButtonStyle.green, custom_id="confirm_post")
-            cancel_button = Button(label="No, cancel", style=discord.ButtonStyle.red, custom_id="cancel_post")
-            
-            async def confirm_callback(interaction):
-                await interaction.response.defer()  # Acknowledge the interaction
-                tags = await get_question_tags()
-                await post_question(tags)
-
-            async def cancel_callback(interaction):
-                await interaction.response.send_message("Your question has not been posted.", ephemeral=True)
-
-            confirm_button.callback = confirm_callback
-            cancel_button.callback = cancel_callback
-            view.add_item(confirm_button)
-            view.add_item(cancel_button)
-
-            # Send the confirmation message with buttons
-            await question.reply(confirmation_message, view=view)
-        else:
-            tags = await get_question_tags()
-            await post_question(tags)
-
-    # TODO - Check if question is answerable by Mistral on internet
-    probe_response = await probe_agent.run(question)
-    if probe_response.lower() == "yes":
-        # answer_response = await answer_agent.run(question)
-        # answer_response = f"Here's what I found online: {answer_response}"
-        # await question.reply(answer_response)  # Send the response back to the DMs
-         # Create a view with buttons
-        view = View()
-        yes_button = Button(label="Yes, search online", style=discord.ButtonStyle.green, custom_id="search_yes")
-        no_button = Button(label="No thanks", style=discord.ButtonStyle.red, custom_id="search_no")
+        async def cancel_callback(interaction):
+            await interaction.response.send_message("Okay, I won't proceed with your question.", ephemeral=True)
         
-        async def yes_callback(interaction):
-            await interaction.response.defer()  # Acknowledge the interaction
-            answer_response = await answer_agent.run(question)
-            answer_response = f"Here's what I found online: {answer_response}"
-            await question.reply(answer_response)
-            
-        async def no_callback(interaction):
-            await interaction.response.send_message("Okay, I won't search online.", ephemeral=True)
-            await post_question_flow()
-            
-        yes_button.callback = yes_callback
-        no_button.callback = no_callback
-        view.add_item(yes_button)
-        view.add_item(no_button)
+        continue_button.callback = continue_callback
+        cancel_button.callback = cancel_callback
+        view.add_item(continue_button)
+        view.add_item(cancel_button)
         
-        # Send message with buttons
-        await question.reply("I might be able to help with this. Would you like me to search online?", view=view)
+        # Show similar questions and ask if they want to continue
+        similar_questions_text = "\n".join([f"• {q}" for q in similar_questions])
+        await message.reply(
+            f"I found some similar questions:\n{similar_questions_text}\n\nWould you like to continue with your question?",
+            view=view
+        )
     else:
-        await post_question_flow()
+        # If no similar questions, proceed to check if agent can answer
+        answer_response = await probe_and_answer_agent.run(message)
+        
+        if answer_response.lower() != "no":
+            # If there's an answer, display it and ask if they want to post
+            await message.reply(f"Here's what I found: {answer_response}")
+            
+            # Ask if they want to post the question
+            post_view = View(timeout=300)
+            post_button = Button(label="Yes, post the question", style=discord.ButtonStyle.green)
+            dont_post_button = Button(label="No, don't post", style=discord.ButtonStyle.red)
+
+            async def post_callback(interaction):
+                await interaction.response.defer()
+                await post_question_flow(message, answer_response)
+
+            async def dont_post_callback(interaction):
+                await interaction.response.send_message("Okay, I won't post your question.", ephemeral=True)
+
+            post_button.callback = post_callback
+            dont_post_button.callback = dont_post_callback
+            post_view.add_item(post_button)
+            post_view.add_item(dont_post_button)
+
+            await message.reply("Do you want to post your question?", view=post_view)
+        else:
+            # If no answer, just proceed with posting
+            await post_question_flow(message)
 
 
 
