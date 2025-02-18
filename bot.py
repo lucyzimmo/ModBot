@@ -42,6 +42,7 @@ probe_and_answer_agent = ProbeAndAnswerAgent()
 # At the top with other constants
 response_channel_id = 1337581994648932363
 rankings_channel_id = 1337904418603008051
+questions_channel = None
 
 # List to store previously asked questions
 previous_questions = []
@@ -75,7 +76,11 @@ def format_first_message(author: discord.Member, content: str, answer_response: 
 
 async def post_question_flow(message: discord.Message, answer_response: str = None):
     async def post_question(tags: list[discord.Object] = None):
-        forum_channel = bot.get_channel(response_channel_id)
+        if questions_channel is None:
+            return
+        
+        forum_channel = questions_channel
+        # bot.get_channel(response_channel_id)
         if forum_channel and isinstance(forum_channel, discord.ForumChannel):
             thread_title = (message.content[:97] + "...") if len(message.content) > 100 else message.content
             
@@ -98,7 +103,7 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
             await message.reply("Error: Could not find forum channel")
 
     async def get_question_tags():
-        forum_channel = bot.get_channel(response_channel_id)
+        forum_channel = questions_channel # bot.get_channel(response_channel_id)
         if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
             logger.error(f"Could not find forum channel with ID {response_channel_id}")
             return []
@@ -153,14 +158,30 @@ async def on_ready():
     Called when the client is done preparing the data received from Discord.
     Prints message on terminal when bot successfully connects to discord.
     """
+    global questions_channel
     logger.info(f"{bot.user} has connected to Discord!")
 
     # Fetch the response channel
-    response_channel = bot.get_channel(response_channel_id)
-    
-    if response_channel is None:
-        logger.error(f"Could not find response channel with ID {response_channel_id}")
+    guild_id = 1326353542037901352
+    guild = bot.get_guild(guild_id)
+    if guild:
+        print(f'Connected to guild: {guild.name}')
+        response_channel = discord.utils.get(guild.channels, name="questions-for-speakers")
+        if response_channel:
+            print(f'Found channel: {response_channel.name}')
+            questions_channel = response_channel
+        else:
+            print('Channel not found!')
+            return
+    else:
+        print('Guild not found!')
         return
+    
+    # response_channel = bot.get_channel(response_channel_id)
+    
+    # if response_channel is None:
+    #     logger.error(f"Could not find response channel with ID {response_channel_id}")
+    #     return
 
     logger.info(f"Channel found: {response_channel.name} (ID: {response_channel.id}, Type: {type(response_channel)})")
 
@@ -187,7 +208,6 @@ async def on_ready():
             logger.error(f"Error fetching messages from forum channel: {e}")
     else:
         logger.error(f"The channel with ID {response_channel_id} is not a forum channel. It is of type: {type(response_channel)}.")
-
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -295,7 +315,7 @@ async def on_message(message: discord.Message):
 @tasks.loop(minutes=1)
 async def sort_forum_by_reactions(speaker_tag: str = None):
     logger.info("Starting forum sort task...")
-    forum_channel = bot.get_channel(response_channel_id)
+    forum_channel = questions_channel # bot.get_channel(response_channel_id)
     rankings_channel = bot.get_channel(rankings_channel_id)
 
     # Check channel types
