@@ -65,6 +65,14 @@ def find_similar_questions(new_question, threshold=0.7):
     
     return [q for q, _ in similar[:3]]  # Return top 3 similar questions
 
+def format_first_message(author: discord.Member, content: str, answer_response: str = None) -> str:
+    post_content = f"**by {author.mention}**"  # must be formatted this way alone for later parsing
+    if len(content) > 100:
+        post_content += f"\n\n**Full question:**\n{content}"
+    if answer_response and answer_response.lower() != "no":
+        post_content += f"\n\n**AI-Generated Answer:**\n{answer_response}"
+    return post_content
+
 async def post_question_flow(message: discord.Message, answer_response: str = None):
     async def post_question(tags: list[discord.Object] = None):
         forum_channel = bot.get_channel(response_channel_id)
@@ -72,12 +80,9 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
             thread_title = (message.content[:97] + "...") if len(message.content) > 100 else message.content
             
             # Create initial post content
-            post_content = f"**Question from {message.author.mention}:**\n{message.content}"
+            post_content = format_first_message(message.author, message.content, answer_response)
             
-            # If there's an answer from Mistral, add it to the post
-            if answer_response and answer_response.lower() != "no":
-                post_content += f"\n\n**AI-Generated Answer:**\n{answer_response}"
-            
+            # Create the forum post with initial message
             thread = await forum_channel.create_thread(
                 name=thread_title,
                 content=post_content,
@@ -100,8 +105,8 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
 
         available_tags = forum_channel.available_tags
         if not available_tags:
-            logger.error(f"No tags found in forum channel with ID {response_channel_id}")
-            return []
+            logger.info(f"No tags found in forum channel with ID {response_channel_id}")
+            return []  # Simply return empty list without showing tag selection UI
 
         view = View(timeout=300)  # 5 minute timeout
         select = Select(
@@ -233,7 +238,7 @@ async def on_message(message: discord.Message):
                 post_view.add_item(post_button)
                 post_view.add_item(dont_post_button)
 
-                await message.reply("Do you want to post your question?", view=post_view)
+                await message.reply("Do you still want to post your question?", view=post_view)
             else:
                 # If no answer, just proceed with posting
                 await post_question_flow(message)
@@ -287,7 +292,7 @@ async def on_message(message: discord.Message):
 
 # Tasks
 
-@tasks.loop(minutes=2)
+@tasks.loop(minutes=1)
 async def sort_forum_by_reactions(speaker_tag: str = None):
     logger.info("Starting forum sort task...")
     forum_channel = bot.get_channel(response_channel_id)
@@ -320,8 +325,7 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
                 if any(tag.name == speaker_tag for tag in thread.applied_tags):
                     filtered_threads.append(thread)
             all_threads = filtered_threads
-
-        logger.info(f"Found {len(all_threads)} threads for speaker tag: {speaker_tag}")
+            logger.info(f"Found {len(all_threads)} threads for speaker tag: {speaker_tag}")
         
         thread_reactions = []
 
@@ -330,27 +334,40 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
         # Process each thread
         for thread in all_threads:
             try:
-                # Initialize original_poster_name
-                original_poster_citation = None
+                # Initialize original_poster mention
+                original_poster = None
                 
-                # Get the starter message
-                logger.info(f"Has starter_message attribute: {hasattr(thread, 'starter_message')}")
-
+                # Get the first message (includes citation)
                 if hasattr(thread, 'starter_message') and thread.starter_message:
                     first_message = thread.starter_message
                     
-                    original_poster_citation = first_message.content if first_message else None
+                    original_poster = first_message.content if first_message else None
                 else:
+                    logger.warning(f"Thread '{thread.name}' has no starter message")
                     async for message in thread.history(limit=1, oldest_first=True):
                         first_message = message
-                        original_poster_citation = first_message.content if first_message else None
+                        original_poster = first_message.content if first_message else None
                         break
+                
+                if original_poster:
+                    try:
+                        # Split by "**by" and make sure there's a second part
+                        parts = original_poster.split("**by")
+                        if len(parts) > 1:
+                            # remove everything after **
+                            parts[1] = parts[1].split("**")[0]
+                            original_poster = parts[1].strip()
+                        else:
+                            original_poster = "Unknown"
+                    except Exception as parse_error:
+                        logger.error(f"Error parsing original poster: {parse_error}")
+                        original_poster = "Unknown"
 
                 logger.info(f"First message content: {first_message.content}")
                 
                 reaction_count = sum(reaction.count for reaction in first_message.reactions) if first_message.reactions else 0
-                thread_reactions.append((thread, reaction_count, original_poster_citation))
-                logger.info(f"Thread '{thread.name}' by {original_poster_citation if original_poster_citation else 'Unknown'} has {reaction_count} reactions")
+                thread_reactions.append((thread, reaction_count, original_poster))
+                logger.info(f"Thread '{thread.name}' by {original_poster if original_poster else 'Unknown'} has {reaction_count} reactions")
             except Exception as thread_error:
                 logger.error(f"Error processing thread '{thread.name}': {thread_error}")
 
@@ -362,11 +379,12 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
         sorted_threads = sorted(thread_reactions, key=lambda x: x[1], reverse=True)
         
         # Create rankings message
-        rankings = "# 🏆 Most Popular Questions\n\n"
-        for i, (thread, reaction_count, original_poster_citation) in enumerate(sorted_threads[:10], 1):
-            author_text = original_poster_citation if original_poster_citation else "by Unkown"
-            rankings += f"{i}. [{thread.name}](<{thread.jump_url}>) - {reaction_count} 👍 {author_text}\n"
-            logger.info(f"Added ranking: {thread.name} with {reaction_count} reactions by {original_poster_citation if original_poster_citation else 'by Unknown'}")
+        rankings = "# 🏆 Most Popular Questions" + (f" for {speaker_tag}" if speaker_tag else " of all time") + "\n\n"
+        for i, (thread, reaction_count, original_poster) in enumerate(sorted_threads[:10], 1):
+            author_mention = original_poster if original_poster else "Unknown"
+            rankings += f"{i}. [{thread.name}](<{thread.jump_url}>)\n"
+            rankings += f"    👍 {reaction_count} reactions | by {author_mention}\n"  # NOTE: for some reason, discord isn't handling these newlines correctly
+            logger.info(f"Added ranking: {thread.name} with {reaction_count} reactions by {original_poster if original_poster else 'Unknown'}")
         
         # Convert UTC to Pacific time
         utc_time = discord.utils.utcnow()
@@ -375,7 +393,11 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
         current_time = pacific_time.strftime("%Y-%m-%d %I:%M:%S %p PST")
         
         rankings += f"\n*Rankings last updated: {current_time}*"
-        rankings += "\n*Updates every 2 minutes*"
+        rankings += "\n*Updates every 1 minute*"
+
+        # Limit the rankings message to 2000 characters due to discord character limits
+        if len(rankings) > 2000:
+            rankings = rankings[:(2000-3)] + "..."
 
         # Update or create rankings message
         existing_message = None
@@ -406,19 +428,19 @@ async def ping(ctx, *, arg=None):
     else:
         await ctx.send(f"Pong! Your argument was {arg}")
 
-@bot.command(name="startsort", help="Starts sorting forum posts by reactions. Usage: !startsort <speaker_tag>")
+@bot.command(name="startsort", help="Starts sorting forum posts by reactions. Usage: !startsort [speaker_tag]")
 async def start_sorting(ctx, speaker_tag: str = None):
     try:
-        if not speaker_tag:
-            await ctx.send("Please provide a speaker tag. Usage: !startsort <speaker_tag>")
-            return
-            
         if sort_forum_by_reactions.is_running():
-            await ctx.send(f"Sorting is already running for {speaker_tag}. To stop, use !stopsort.")
+            await ctx.send(f"Sorting is already running. To stop, use !stopsort.")
         else:
             sort_forum_by_reactions.start(speaker_tag)
-            await ctx.send(f"Started sorting forum posts by reactions for speaker tag '{speaker_tag}'. Updates every 2 minutes.")
-            logger.info(f"Forum sorting started by user command for speaker tag: {speaker_tag}")
+            if speaker_tag:
+                await ctx.send(f"Started sorting forum posts by reactions for speaker tag '{speaker_tag}'. Updates every 1 minute.")
+            else:
+                await ctx.send("Started sorting all forum posts by reactions. Updates every 1 minute.\n" +
+                             "Tip: To sort by a specific speaker, use !startsort <speaker_tag>")
+            logger.info(f"Forum sorting started by user command{' for speaker tag: ' + speaker_tag if speaker_tag else ' for all posts'}")
     except Exception as e:
         error_message = f"Error starting sort: {str(e)}"
         logger.error(error_message)
