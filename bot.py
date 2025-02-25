@@ -40,15 +40,17 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 probe_and_answer_agent = ProbeAndAnswerAgent()
 
 # At the top with other constants
-response_channel_id = 1337581994648932363
+# response_channel_id = 1337581994648932363
+guild_id = 1326353542037901352
 rankings_channel_id = 1337904418603008051
+questions_channel = None
 
 # List to store previously asked questions
 previous_questions = {}  # {tag_id: [(question, thread_id), ...]}
 
 def find_similar_questions(new_question, message, tags=None, threshold=0.6):
     if not tags:
-        logger.info("No tags provided")
+        # logger.info("No previous questions found")
         return []
 
     # Use first available tag
@@ -139,20 +141,33 @@ async def get_question_tags(msg: discord.Message):
 
 async def post_question_flow(message: discord.Message, answer_response: str = None, tags: list = None):
     async def post_question(tags: list[discord.Object] = None):
-        forum_channel = bot.get_channel(response_channel_id)
+        if questions_channel is None:
+            return
+        
+        forum_channel = questions_channel
+        # bot.get_channel(response_channel_id)
         if forum_channel and isinstance(forum_channel, discord.ForumChannel):
             thread_title = (message.content[:97] + "...") if len(message.content) > 100 else message.content
             
-            # Create initial post content
-            post_content = format_first_message(message.author, message.content, answer_response)
+            try:
+                # Create initial post content
+                post_content = format_first_message(message.author, message.content, answer_response)
+                
+                # Create the forum post with initial message
+                thread = await forum_channel.create_thread(
+                    name=thread_title,
+                    content=post_content,
+                    applied_tags=tags
+                )
+                await message.reply("Question posted!")
+                
+                # Add to previous questions list
+                previous_questions.append(message.content)
+                # logger.info("Updated previous questions: %s", previous_questions)
             
-            # Create the forum post with initial message
-            thread = await forum_channel.create_thread(
-                name=thread_title,
-                content=post_content,
-                applied_tags=tags
-            )
-            await message.reply("Question posted!")
+            except Exception as e:
+                logger.error(f"Failed to post question: {e}")
+                await message.reply("Error: Something went wrong. We could not post your question.")
             
             # Add to previous questions dictionary
             if tags:
@@ -170,16 +185,32 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
 
 @bot.event
 async def on_ready():
-    """Called when the client is done preparing the data received from Discord."""
+    """
+    Called when the client is done preparing the data received from Discord.
+    Prints message on terminal when bot successfully connects to discord.
+    """
+    global questions_channel
     logger.info(f"{bot.user} has connected to Discord!")
-    response_channel = bot.get_channel(response_channel_id)
-    
-    if response_channel is None:
-        logger.error(f"Could not find response channel with ID {response_channel_id}")
+
+    # Fetch the response channel
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        logger.error('Guild not found!')
         return
+    
+    logger.info(f'Connected to guild: {guild.name}')
+    response_channel = discord.utils.get(guild.channels, name="questions-for-speakers")
+    if not response_channel:
+        logger.error("Could not find response channel")
+        return
+    
+    logger.error(f'Found channel: {response_channel.name}')
+    questions_channel = response_channel
+
+    # logger.info(f"Channel found: {response_channel.name} (ID: {response_channel.id}, Type: {type(response_channel)})")
 
     if isinstance(response_channel, discord.ForumChannel):
-        logger.info(f"Fetching threads from forum channel: {response_channel.name}")
+        # logger.info(f"Fetching threads from forum channel: {response_channel.name}")
         
         # Clear existing dictionary
         previous_questions.clear()
@@ -225,7 +256,6 @@ async def on_ready():
     else:
         logger.error(f"The channel with ID {response_channel_id} is not a forum channel. It is of type: {type(response_channel)}.")
 
-
 @bot.event
 async def on_message(message: discord.Message):
     """
@@ -239,7 +269,7 @@ async def on_message(message: discord.Message):
     if message.author.bot or message.content.startswith("!"):
         return
 
-    logger.info("Received message from %s: %s", message.author, message.content)
+    # logger.info("Received message from %s: %s", message.author, message.content)
 
     # Get tags first
     tags = await get_question_tags(message)
@@ -257,7 +287,12 @@ async def on_message(message: discord.Message):
         async def continue_callback(interaction):
             await interaction.response.defer()
             # Step 2: If user continues, check if agent can answer
-            answer_response = await probe_and_answer_agent.run(message)
+            try:
+                answer_response = await probe_and_answer_agent.run(message)
+            except Exception as e:
+                logger.error(f"Error getting answer from agent: {e}")
+                await message.reply("Error: Something went wrong. We could not answer your question.")
+                return
             
             if answer_response.lower() != "no":
                 # Step 3: If there's an answer, display it and ask if they want to post
@@ -347,8 +382,8 @@ async def on_message(message: discord.Message):
 
 @tasks.loop(minutes=1)
 async def sort_forum_by_reactions(speaker_tag: str = None):
-    logger.info("Starting forum sort task...")
-    forum_channel = bot.get_channel(response_channel_id)
+    # logger.info("Starting forum sort task...")
+    forum_channel = questions_channel # bot.get_channel(response_channel_id)
     rankings_channel = bot.get_channel(rankings_channel_id)
 
     # Check channel types
@@ -368,7 +403,7 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
         active_threads = forum_channel.threads
         all_threads = list(active_threads) + archived_threads
         
-        logger.info(f"Found {len(all_threads)} total threads")
+        # logger.info(f"Found {len(all_threads)} total threads")
 
         # Filter threads by speaker tag if provided
         if speaker_tag:
@@ -378,7 +413,7 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
                 if any(tag.name == speaker_tag for tag in thread.applied_tags):
                     filtered_threads.append(thread)
             all_threads = filtered_threads
-            logger.info(f"Found {len(all_threads)} threads for speaker tag: {speaker_tag}")
+            # logger.info(f"Found {len(all_threads)} threads for speaker tag: {speaker_tag}")
         
         thread_reactions = []
 
@@ -416,11 +451,11 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
                         logger.error(f"Error parsing original poster: {parse_error}")
                         original_poster = "Unknown"
 
-                logger.info(f"First message content: {first_message.content}")
+                # logger.info(f"First message content: {first_message.content}")
                 
                 reaction_count = sum(reaction.count for reaction in first_message.reactions) if first_message.reactions else 0
                 thread_reactions.append((thread, reaction_count, original_poster))
-                logger.info(f"Thread '{thread.name}' by {original_poster if original_poster else 'Unknown'} has {reaction_count} reactions")
+                # logger.info(f"Thread '{thread.name}' by {original_poster if original_poster else 'Unknown'} has {reaction_count} reactions")
             except Exception as thread_error:
                 logger.error(f"Error processing thread '{thread.name}': {thread_error}")
 
@@ -437,7 +472,7 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
             author_mention = original_poster if original_poster else "Unknown"
             rankings += f"{i}. [{thread.name}](<{thread.jump_url}>)\n"
             rankings += f"    👍 {reaction_count} reactions | by {author_mention}\n"  # NOTE: for some reason, discord isn't handling these newlines correctly
-            logger.info(f"Added ranking: {thread.name} with {reaction_count} reactions by {original_poster if original_poster else 'Unknown'}")
+            # logger.info(f"Added ranking: {thread.name} with {reaction_count} reactions by {original_poster if original_poster else 'Unknown'}")
         
         # Convert UTC to Pacific time
         utc_time = discord.utils.utcnow()
@@ -461,10 +496,10 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
 
         if existing_message:
             await existing_message.edit(content=rankings)
-            logger.info(f"Updated rankings message at {current_time}")
+            # logger.info(f"Updated rankings message at {current_time}")
         else:
             await rankings_channel.send(rankings)
-            logger.info(f"Created new rankings message at {current_time}")
+            # logger.info(f"Created new rankings message at {current_time}")
                 
     except Exception as e:
         logger.error(f"Error in sort_forum_by_reactions: {e}")
@@ -493,7 +528,7 @@ async def start_sorting(ctx, speaker_tag: str = None):
             else:
                 await ctx.send("Started sorting all forum posts by reactions. Updates every 1 minute.\n" +
                              "Tip: To sort by a specific speaker, use !startsort <speaker_tag>")
-            logger.info(f"Forum sorting started by user command{' for speaker tag: ' + speaker_tag if speaker_tag else ' for all posts'}")
+            # logger.info(f"Forum sorting started by user command{' for speaker tag: ' + speaker_tag if speaker_tag else ' for all posts'}")
     except Exception as e:
         error_message = f"Error starting sort: {str(e)}"
         logger.error(error_message)
@@ -505,7 +540,7 @@ async def stop_sorting(ctx):
         if sort_forum_by_reactions.is_running():
             sort_forum_by_reactions.cancel()
             await ctx.send("Stopped sorting forum posts.")
-            logger.info("Forum sorting stopped by user command")
+            # logger.info("Forum sorting stopped by user command")
         else:
             await ctx.send("Sorting was not running!")
     except Exception as e:
