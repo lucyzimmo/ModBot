@@ -125,7 +125,7 @@ async def get_question_tags(msg: discord.Message):
     select.callback = select_callback
     view.add_item(select)
     
-    done_button = Button(label="Done", style=discord.ButtonStyle.green)
+    done_button = Button(label="Post", style=discord.ButtonStyle.green)
     
     async def done_callback(interaction):
         view.stop()
@@ -134,7 +134,7 @@ async def get_question_tags(msg: discord.Message):
     done_button.callback = done_callback
     view.add_item(done_button)
     
-    await msg.reply("Please select tags for your question:", view=view)
+    await msg.reply("Please select tags for your question:", view=view, ephemeral=True)
     await view.wait()
     
     return selected_tags
@@ -171,12 +171,12 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
                 await message.reply("Question posted!")
                 
                 # Add to previous questions list
-                previous_questions.append(message.content)
+                # previous_questions.append(message.content)
                 # logger.info("Updated previous questions: %s", previous_questions)
             
             except Exception as e:
                 logger.error(f"Failed to post question: {e}")
-                await message.reply("Error: Something went wrong. We could not post your question.")
+                await message.reply("Error: Something went wrong. We could not post your question.", ephemeral=True)
             
             # Add to previous questions dictionary
             if tags:
@@ -187,7 +187,7 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
                     logger.info(f"Added new question to tag {tag.name}: {thread_title}")
         else:
             logger.error(f"Could not find forum channel")
-            await message.reply("Error: Could not find forum channel")
+            await message.reply("Error: Could not find forum channel", ephemeral=True)
 
     # Use passed tags instead of asking again
     await post_question(tags)
@@ -240,7 +240,7 @@ async def on_ready():
                 try:
                     # Get the first message in each thread
                     async for message in thread.history(limit=1, oldest_first=True):
-                        if not message.author.bot:
+                        if not message.author.bot:  # TODO - QUESTION
                             # Store question for each tag
                             for tag in thread.applied_tags:
                                 if tag.id not in previous_questions:
@@ -300,7 +300,7 @@ async def on_message(message: discord.Message):
                 answer_response = await probe_and_answer_agent.run(message)
             except Exception as e:
                 logger.error(f"Error getting answer from agent: {e}")
-                await message.reply("Error: Something went wrong. We could not answer your question.")
+                await message.reply("Error: Something went wrong. We could not answer your question.", ephemeral=True)
                 return
             
             if answer_response.lower() != "no":
@@ -324,7 +324,7 @@ async def on_message(message: discord.Message):
                 post_view.add_item(post_button)
                 post_view.add_item(dont_post_button)
 
-                await message.reply("Do you still want to post your question?", view=post_view)
+                await message.reply("Do you still want to post your question?", view=post_view, ephemeral=True)
             else:
                 # If no answer, just proceed with posting
                 await post_question_flow(message, answer_response, tags)
@@ -340,19 +340,20 @@ async def on_message(message: discord.Message):
 
         
         # Show similar questions and ask if they want to continue
-        embed = discord.Embed(title="I found some similar questions:", color=discord.Color.blue())
+        embed = discord.Embed(color=discord.Color.blue())  # title="I found some similar questions:", 
 
         for question, thread_url in similar_questions:
             embed.add_field(
-                name="Similar Question",
-                value=f"{question}\n[View Thread]({thread_url})",
+                name=f"{question if len(question) < 256 else question[:(256-3)] + "..."}",
+                value=f"[View Thread]({thread_url})",
                 inline=False
             )
 
         await message.reply(
-            "I found some similar questions. Would you like to continue with your question?",
+            "Here are some similar questions that others have already asked. Click 'view thread' to head over and upvote a question.",
             embed=embed,
-            view=view
+            view=view,
+            ephemeral=True
         )
     else:
         # If no similar questions, proceed to check if agent can answer
@@ -360,7 +361,7 @@ async def on_message(message: discord.Message):
         
         if answer_response.lower() != "no":
             # If there's an answer, display it and ask if they want to post
-            await message.reply(f"Here's what I found: {answer_response}")
+            await message.reply(f"Here's what I found online: {answer_response}")
             
             # Ask if they want to post the question
             post_view = View(timeout=300)
@@ -379,7 +380,7 @@ async def on_message(message: discord.Message):
             post_view.add_item(post_button)
             post_view.add_item(dont_post_button)
 
-            await message.reply("Do you want to post your question?", view=post_view)
+            await message.reply("Do you still want to post your question?", view=post_view, ephemeral=True)
         else:
             # If no answer, just proceed with posting
             await post_question_flow(message, answer_response, tags)
@@ -433,32 +434,34 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
             try:
                 # Initialize original_poster mention
                 original_poster = None
+                first_message = None
                 
                 # Get the first message (includes citation)
                 if hasattr(thread, 'starter_message') and thread.starter_message:
                     first_message = thread.starter_message
-                    
-                    original_poster = first_message.content if first_message else None
                 else:
-                    logger.warning(f"Thread '{thread.name}' has no starter message")
+                    # logger.warning(f"Thread '{thread.name}' has no starter message")
                     async for message in thread.history(limit=1, oldest_first=True):
                         first_message = message
-                        original_poster = first_message.content if first_message else None
                         break
                 
-                if original_poster:
+                if first_message:
                     try:
-                        # Split by "**by" and make sure there's a second part
-                        parts = original_poster.split("**by")
-                        if len(parts) > 1:
-                            # remove everything after **
-                            parts[1] = parts[1].split("**")[0]
-                            original_poster = parts[1].strip()
+                        if first_message.author.id == bot.user.id:  # Access author if sent by ModBot
+                            # Split by "**by" and make sure there's a second part
+                            original_poster = first_message.content if first_message else None
+                            parts = original_poster.split("**by")
+                            if len(parts) > 1:
+                                # remove everything after **
+                                parts[1] = parts[1].split("**")[0]
+                                original_poster = parts[1].strip()
+                            else:
+                                original_poster = None
                         else:
-                            original_poster = "Unknown"
+                            original_poster = first_message.author.mention
                     except Exception as parse_error:
                         logger.error(f"Error parsing original poster: {parse_error}")
-                        original_poster = "Unknown"
+                        original_poster = None
 
                 # logger.info(f"First message content: {first_message.content}")
                 
@@ -514,16 +517,6 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
         logger.error(f"Error in sort_forum_by_reactions: {e}")
 # Commands
 
-
-# This example command is here to show you how to add commands to the bot.
-# Run !ping with any number of arguments to see the command in action.
-# Feel free to delete this if your project will not need commands.
-@bot.command(name="ping", help="Pings the bot.")
-async def ping(ctx, *, arg=None):
-    if arg is None:
-        await ctx.send("Pong!")
-    else:
-        await ctx.send(f"Pong! Your argument was {arg}")
 
 @bot.command(name="startsort", help="Starts sorting forum posts by reactions. Usage: !startsort [speaker_tag]")
 async def start_sorting(ctx, speaker_tag: str = None):
