@@ -139,6 +139,15 @@ async def get_question_tags(msg: discord.Message):
     
     return selected_tags
 
+def format_first_message(author: discord.Member, content: str, answer_response: str = None) -> str:
+    post_content = f"**by {author.mention}**"  # must be formatted this way alone for later parsing
+    if len(content) > 100:
+        post_content += f"\n\n**Full question:**\n{content}"
+    if answer_response and answer_response.lower() != "no":
+        post_content += f"\n\n**AI-Generated Answer:**\n{answer_response}"
+    return post_content
+
+
 async def post_question_flow(message: discord.Message, answer_response: str = None, tags: list = None):
     async def post_question(tags: list[discord.Object] = None):
         if questions_channel is None:
@@ -243,13 +252,13 @@ async def on_ready():
                     logger.error(f"Error processing thread {thread.name}: {thread_error}")
 
             # Log summary of loaded questions
-            logger.info("Summary of loaded questions:")
-            for tag_id, questions in previous_questions.items():
-                tag = discord.utils.get(response_channel.available_tags, id=tag_id)
-                if tag:
-                    logger.info(f"Tag {tag.name}: {len(questions)} questions")
-                    for q, tid in questions:
-                        logger.info(f"  - {q} (Thread ID: {tid})")
+            # logger.info("Summary of loaded questions:")
+            # for tag_id, questions in previous_questions.items():
+            #     tag = discord.utils.get(response_channel.available_tags, id=tag_id)
+            #     if tag:
+            #         logger.info(f"Tag {tag.name}: {len(questions)} questions")
+            #         for q, tid in questions:
+            #             logger.info(f"  - {q} (Thread ID: {tid})")
 
         except Exception as e:
             logger.error(f"Error fetching messages from forum channel: {e}")
