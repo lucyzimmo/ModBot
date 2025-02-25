@@ -96,11 +96,13 @@ async def get_question_tags(msg: discord.Message):
     forum_channel = questions_channel  # forum_channel = bot.get_channel(response_channel_id)
     if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
         logger.error(f"Could not find forumn channel not populated from guild when fetching tags")
+        await msg.reply("Unable to process question: Could not find forum channel")
         return []
 
     available_tags = forum_channel.available_tags
     if not available_tags:
         logger.error(f"No tags found in forum channel")
+        await msg.reply("Unable to process question: No tags found in forum channel")
         return []
 
     view = View(timeout=300)
@@ -117,26 +119,36 @@ async def get_question_tags(msg: discord.Message):
         selected_tags.clear()
         # Store the actual tag objects instead of just IDs
         selected_tags.extend([tag for tag in available_tags if str(tag.id) in select.values])
-        await interaction.response.send_message(
-            f"Selected tags: {', '.join(tag.name for tag in selected_tags)}",
-            ephemeral=True
-        )
+        await interaction.response.defer()
+        view.stop()
+        # await interaction.response.send_message(
+        #     f"Selected tags: {', '.join(tag.name for tag in selected_tags)}",
+        #     ephemeral=True
+        # )
     
     select.callback = select_callback
     view.add_item(select)
     
-    done_button = Button(label="Post", style=discord.ButtonStyle.green)
+    # done_button = Button(label="Done", style=discord.ButtonStyle.green)
     
-    async def done_callback(interaction):
-        view.stop()
-        await interaction.response.defer()
+    # async def done_callback(interaction):
+    #     await interaction.response.defer()  # Acknowledge the interaction
+    #     view.stop()  # Stop the view to clear outstanding interactions
+    #     # await interaction.followup.send(  # Use followup to send the message after stopping the view
+    #     #     f"Great! Attributed question with the tags: {', '.join(tag.name for tag in selected_tags)}"
+    #     # )
+
+    async def cancel_callback(interaction):
+        await interaction.response.send_message("Okay, I won't proceed with your question.")
     
-    done_button.callback = done_callback
-    view.add_item(done_button)
+    # done_button.callback = done_callback
+    # view.add_item(done_button)
     
-    await msg.reply("Please select tags for your question:", view=view, ephemeral=True)
+    await msg.reply("Please select tags for your question:", view=view)  # , ephemeral=True
     await view.wait()
     
+    if len(selected_tags) == 0:
+        return []
     return selected_tags
 
 def format_first_message(author: discord.Member, content: str, answer_response: str = None) -> str:
@@ -176,7 +188,7 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
             
             except Exception as e:
                 logger.error(f"Failed to post question: {e}")
-                await message.reply("Error: Something went wrong. We could not post your question.", ephemeral=True)
+                await message.reply("Error: Something went wrong. We could not post your question.")
             
             # Add to previous questions dictionary
             if tags:
@@ -187,7 +199,7 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
                     logger.info(f"Added new question to tag {tag.name}: {thread_title}")
         else:
             logger.error(f"Could not find forum channel")
-            await message.reply("Error: Could not find forum channel", ephemeral=True)
+            await message.reply("Error: Could not find forum channel")
 
     # Use passed tags instead of asking again
     await post_question(tags)
@@ -274,6 +286,30 @@ async def on_message(message: discord.Message):
     """
     await bot.process_commands(message)
 
+    async def confirm_post_with_ai():
+        # Step 3: If there's an answer, display it and ask if they want to post
+        # await message.reply(f"Here's what I found online: {answer_response}")
+        
+        # Ask if they want to post the question
+        post_view = View(timeout=300)
+        post_button = Button(label="Yes, post the question", style=discord.ButtonStyle.green)
+        dont_post_button = Button(label="No, don't post", style=discord.ButtonStyle.red)
+
+        async def post_callback(interaction):
+            await interaction.response.defer()
+            await post_question_flow(message, answer_response, tags)
+
+        async def dont_post_callback(interaction):
+            await interaction.response.send_message("Okay, I won't post your question.") #  ephemeral=True
+
+        post_button.callback = post_callback
+        dont_post_button.callback = dont_post_callback
+        post_view.add_item(post_button)
+        post_view.add_item(dont_post_button)
+
+        await message.reply(f"Here's what I found online: {answer_response}\n\nDo you still want to post your question?", view=post_view)  # ephemeral=True
+
+
     # Ignore bot messages and commands
     if message.author.bot or message.content.startswith("!"):
         return
@@ -300,37 +336,17 @@ async def on_message(message: discord.Message):
                 answer_response = await probe_and_answer_agent.run(message)
             except Exception as e:
                 logger.error(f"Error getting answer from agent: {e}")
-                await message.reply("Error: Something went wrong. We could not answer your question.", ephemeral=True)
+                await message.reply("Error: Something went wrong. We could not answer your question.")
                 return
             
             if answer_response.lower() != "no":
-                # Step 3: If there's an answer, display it and ask if they want to post
-                await message.reply(f"Here's what I found: {answer_response}")
-                
-                # Ask if they want to post the question
-                post_view = View(timeout=300)
-                post_button = Button(label="Yes, post the question", style=discord.ButtonStyle.green)
-                dont_post_button = Button(label="No, don't post", style=discord.ButtonStyle.red)
-
-                async def post_callback(interaction):
-                    await interaction.response.defer()
-                    await post_question_flow(message, answer_response, tags)
-
-                async def dont_post_callback(interaction):
-                    await interaction.response.send_message("Okay, I won't post your question.", ephemeral=True)
-
-                post_button.callback = post_callback
-                dont_post_button.callback = dont_post_callback
-                post_view.add_item(post_button)
-                post_view.add_item(dont_post_button)
-
-                await message.reply("Do you still want to post your question?", view=post_view, ephemeral=True)
+                confirm_post_with_ai()
             else:
                 # If no answer, just proceed with posting
                 await post_question_flow(message, answer_response, tags)
         
         async def cancel_callback(interaction):
-            await interaction.response.send_message("Okay, I won't proceed with your question.", ephemeral=True)
+            await interaction.response.send_message("Okay, I won't proceed with your question.")  #  ephemeral=True
         
         continue_button.callback = continue_callback
         cancel_button.callback = cancel_callback
@@ -350,10 +366,9 @@ async def on_message(message: discord.Message):
             )
 
         await message.reply(
-            "Here are some similar questions that others have already asked. Click 'view thread' to head over and upvote a question.",
+            "Here are some similar questions that others have already asked.\nClick 'view thread' to head over and upvote a question.",
             embed=embed,
-            view=view,
-            ephemeral=True
+            view=view
         )
     else:
         # If no similar questions, proceed to check if agent can answer
@@ -361,7 +376,7 @@ async def on_message(message: discord.Message):
         
         if answer_response.lower() != "no":
             # If there's an answer, display it and ask if they want to post
-            await message.reply(f"Here's what I found online: {answer_response}")
+            # await message.reply(f"Here's what I found online: {answer_response}")
             
             # Ask if they want to post the question
             post_view = View(timeout=300)
@@ -373,14 +388,15 @@ async def on_message(message: discord.Message):
                 await post_question_flow(message, answer_response, tags)
 
             async def dont_post_callback(interaction):
-                await interaction.response.send_message("Okay, I won't post your question.", ephemeral=True)
+                await interaction.response.send_message("Okay, I won't post your question.")  # ephemeral=True
 
             post_button.callback = post_callback
             dont_post_button.callback = dont_post_callback
             post_view.add_item(post_button)
             post_view.add_item(dont_post_button)
 
-            await message.reply("Do you still want to post your question?", view=post_view, ephemeral=True)
+            await message.reply(f"Here's what I found online: {answer_response}\n\nDo you still want to post your question?", view=post_view)  # ephemeral=True
+            # confirm_post_with_ai()
         else:
             # If no answer, just proceed with posting
             await post_question_flow(message, answer_response, tags)
