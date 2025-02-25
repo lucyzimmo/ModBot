@@ -258,11 +258,12 @@ async def on_ready():
                             if tag.id not in previous_questions:
                                 previous_questions[tag.id] = []
                             previous_questions[tag.id].append((thread.name, thread.id))
-                            logger.info(f"Added question to tag {tag.name}: {thread.name}")
+                            # logger.info(f"Added question to tag {tag.name}: {thread.name}")
                         break
                 except Exception as thread_error:
                     logger.error(f"Error processing thread {thread.name}: {thread_error}")
 
+            logger.info("Loaded previous questions")
             # Log summary of loaded questions
             # logger.info("Summary of loaded questions:")
             # for tag_id, questions in previous_questions.items():
@@ -479,9 +480,10 @@ async def sort_forum_by_reactions(speaker_tag: str = None):
                         logger.error(f"Error parsing original poster: {parse_error}")
                         original_poster = None
 
-                # logger.info(f"First message content: {first_message.content}")
-                
-                reaction_count = sum(reaction.count for reaction in first_message.reactions) if first_message.reactions else 0
+                reaction_count = 0
+                if first_message and first_message.reactions:
+                    reaction_count = sum(reaction.count for reaction in first_message.reactions)
+
                 thread_reactions.append((thread, reaction_count, original_poster))
                 # logger.info(f"Thread '{thread.name}' by {original_poster if original_poster else 'Unknown'} has {reaction_count} reactions")
             except Exception as thread_error:
@@ -546,7 +548,7 @@ async def start_sorting(ctx, speaker_tag: str = None):
             else:
                 await ctx.send("Started sorting all forum posts by reactions. Updates every 1 minute.\n" +
                              "Tip: To sort by a specific speaker, use !startsort <speaker_tag>")
-            # logger.info(f"Forum sorting started by user command{' for speaker tag: ' + speaker_tag if speaker_tag else ' for all posts'}")
+            logger.info(f"Forum sorting started by user command{' for speaker tag: ' + speaker_tag if speaker_tag else ' for all posts'}")
     except Exception as e:
         error_message = f"Error starting sort: {str(e)}"
         logger.error(error_message)
@@ -558,7 +560,7 @@ async def stop_sorting(ctx):
         if sort_forum_by_reactions.is_running():
             sort_forum_by_reactions.cancel()
             await ctx.send("Stopped sorting forum posts.")
-            # logger.info("Forum sorting stopped by user command")
+            logger.info("Forum sorting stopped by user command")
         else:
             await ctx.send("Sorting was not running!")
     except Exception as e:
