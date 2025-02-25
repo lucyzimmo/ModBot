@@ -252,14 +252,14 @@ async def on_ready():
                 try:
                     # Get the first message in each thread
                     async for message in thread.history(limit=1, oldest_first=True):
-                        if not message.author.bot:  # TODO - QUESTION
-                            # Store question for each tag
-                            for tag in thread.applied_tags:
-                                if tag.id not in previous_questions:
-                                    previous_questions[tag.id] = []
-                                previous_questions[tag.id].append((thread.name, thread.id))
-                                logger.info(f"Added question to tag {tag.name}: {thread.name}")
-                            break
+                        # if not message.author.bot:  # TODO - QUESTION
+                        # Store question for each tag
+                        for tag in thread.applied_tags:
+                            if tag.id not in previous_questions:
+                                previous_questions[tag.id] = []
+                            previous_questions[tag.id].append((thread.name, thread.id))
+                            logger.info(f"Added question to tag {tag.name}: {thread.name}")
+                        break
                 except Exception as thread_error:
                     logger.error(f"Error processing thread {thread.name}: {thread_error}")
 
