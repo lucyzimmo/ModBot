@@ -93,14 +93,14 @@ def find_similar_questions(new_question, message, tags=None, threshold=0.6):
 
 # Move this function outside of post_question_flow
 async def get_question_tags(msg: discord.Message):
-    forum_channel = bot.get_channel(response_channel_id)
+    forum_channel = questions_channel  # forum_channel = bot.get_channel(response_channel_id)
     if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
-        logger.error(f"Could not find forum channel with ID {response_channel_id}")
+        logger.error(f"Could not find forumn channel not populated from guild when fetching tags")
         return []
 
     available_tags = forum_channel.available_tags
     if not available_tags:
-        logger.error(f"No tags found in forum channel with ID {response_channel_id}")
+        logger.error(f"No tags found in forum channel")
         return []
 
     view = View(timeout=300)
@@ -177,7 +177,7 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
                     previous_questions[tag.id].append((thread_title, thread.thread.id))
                     logger.info(f"Added new question to tag {tag.name}: {thread_title}")
         else:
-            logger.error(f"Could not find forum channel with ID {response_channel_id}")
+            logger.error(f"Could not find forum channel")
             await message.reply("Error: Could not find forum channel")
 
     # Use passed tags instead of asking again
@@ -204,7 +204,7 @@ async def on_ready():
         logger.error("Could not find response channel")
         return
     
-    logger.error(f'Found channel: {response_channel.name}')
+    logger.info(f'Found channel: {response_channel.name}')
     questions_channel = response_channel
 
     # logger.info(f"Channel found: {response_channel.name} (ID: {response_channel.id}, Type: {type(response_channel)})")
@@ -254,7 +254,7 @@ async def on_ready():
         except Exception as e:
             logger.error(f"Error fetching messages from forum channel: {e}")
     else:
-        logger.error(f"The channel with ID {response_channel_id} is not a forum channel. It is of type: {type(response_channel)}.")
+        logger.error(f"The 'forumn channel' from guild is not a forum channel. It is of type: {type(response_channel)}.")
 
 @bot.event
 async def on_message(message: discord.Message):
