@@ -44,36 +44,100 @@ response_channel_id = 1337581994648932363
 rankings_channel_id = 1337904418603008051
 
 # List to store previously asked questions
-previous_questions = []
+previous_questions = {}  # {tag_id: [(question, thread_id), ...]}
 
-def find_similar_questions(new_question, threshold=0.7):
-    if not previous_questions:  # If no previous questions, return empty list
-        logger.info("No previous questions found")
+def find_similar_questions(new_question, message, tags=None, threshold=0.6):
+    if not tags:
+        logger.info("No tags provided")
+        return []
+
+    # Use first available tag
+    current_tag = tags[0] if tags else None
+    if not current_tag:
+        logger.info("No speaker tag found")
         return []
     
+    key = current_tag.id  # Ensure tag.id is used for lookup
+    tag_questions = previous_questions.get(key, [])
+
+    # Log previous questions for the current tag
+    logger.info(f"Previous questions for tag ID {key} ({current_tag.name}): {tag_questions}")
+
+    if not tag_questions:
+        logger.info(f"No previous questions for tag ID: {key} ({current_tag.name})")
+        return []
+
+    # Unpack questions and thread_ids
+    filtered_questions, filtered_thread_ids = zip(*tag_questions) if tag_questions else ([], [])
+
     # Create TF-IDF vectors
     vectorizer = TfidfVectorizer()
-    all_questions = previous_questions + [new_question]
+    all_questions = list(filtered_questions) + [new_question]
     tfidf_matrix = vectorizer.fit_transform(all_questions)
-    
-    # Calculate similarity with the new question
+
+    # Calculate similarity
     similarity_vector = cosine_similarity(tfidf_matrix[-1:], tfidf_matrix[:-1])[0]
-    
+
     # Get similar questions above threshold
-    similar = [(q, score) for q, score in zip(previous_questions, similarity_vector) if score > threshold]
+    similar = [
+        (q, score, tid) for q, score, tid in zip(filtered_questions, similarity_vector, filtered_thread_ids)
+        if score > threshold
+    ]
     similar.sort(key=lambda x: x[1], reverse=True)
+
+    guild_id = message.guild.id if hasattr(message, 'guild') else None
+    # Return both the question text and the formatted link
+    return [(q, f"https://discord.com/channels/{guild_id}/{tid}") for q, score, tid in similar[:5]]
+
+# Move this function outside of post_question_flow
+async def get_question_tags(msg: discord.Message):
+    forum_channel = bot.get_channel(response_channel_id)
+    if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
+        logger.error(f"Could not find forum channel with ID {response_channel_id}")
+        return []
+
+    available_tags = forum_channel.available_tags
+    if not available_tags:
+        logger.error(f"No tags found in forum channel with ID {response_channel_id}")
+        return []
+
+    view = View(timeout=300)
+    select = Select(
+        placeholder="Choose tags for your question...",
+        min_values=1,  # Require at least one tag
+        max_values=min(len(available_tags), 5),
+        options=[discord.SelectOption(label=tag.name, value=str(tag.id)) for tag in available_tags]
+    )
     
-    return [q for q, _ in similar[:3]]  # Return top 3 similar questions
+    selected_tags = []
+    
+    async def select_callback(interaction):
+        selected_tags.clear()
+        # Store the actual tag objects instead of just IDs
+        selected_tags.extend([tag for tag in available_tags if str(tag.id) in select.values])
+        await interaction.response.send_message(
+            f"Selected tags: {', '.join(tag.name for tag in selected_tags)}",
+            ephemeral=True
+        )
+    
+    select.callback = select_callback
+    view.add_item(select)
+    
+    done_button = Button(label="Done", style=discord.ButtonStyle.green)
+    
+    async def done_callback(interaction):
+        view.stop()
+        await interaction.response.defer()
+    
+    done_button.callback = done_callback
+    view.add_item(done_button)
+    
+    await msg.reply("Please select tags for your question:", view=view)
+    await view.wait()
+    
+    return selected_tags
 
-def format_first_message(author: discord.Member, content: str, answer_response: str = None) -> str:
-    post_content = f"**by {author.mention}**"  # must be formatted this way alone for later parsing
-    if len(content) > 100:
-        post_content += f"\n\n**Full question:**\n{content}"
-    if answer_response and answer_response.lower() != "no":
-        post_content += f"\n\n**AI-Generated Answer:**\n{answer_response}"
-    return post_content
-
-async def post_question_flow(message: discord.Message, answer_response: str = None):
+async def post_question_flow(message: discord.Message, answer_response: str = None, tags: list = None):
     async def post_question(tags: list[discord.Object] = None):
         forum_channel = bot.get_channel(response_channel_id)
         if forum_channel and isinstance(forum_channel, discord.ForumChannel):
@@ -90,98 +154,71 @@ async def post_question_flow(message: discord.Message, answer_response: str = No
             )
             await message.reply("Question posted!")
             
-            # Add to previous questions list
-            previous_questions.append(message.content)
-            logger.info("Updated previous questions: %s", previous_questions)
+            # Add to previous questions dictionary
+            if tags:
+                for tag in tags:
+                    if tag.id not in previous_questions:
+                        previous_questions[tag.id] = []
+                    previous_questions[tag.id].append((thread_title, thread.thread.id))
+                    logger.info(f"Added new question to tag {tag.name}: {thread_title}")
         else:
             logger.error(f"Could not find forum channel with ID {response_channel_id}")
             await message.reply("Error: Could not find forum channel")
 
-    async def get_question_tags():
-        forum_channel = bot.get_channel(response_channel_id)
-        if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
-            logger.error(f"Could not find forum channel with ID {response_channel_id}")
-            return []
-
-        available_tags = forum_channel.available_tags
-        if not available_tags:
-            logger.info(f"No tags found in forum channel with ID {response_channel_id}")
-            return []  # Simply return empty list without showing tag selection UI
-
-        view = View(timeout=300)  # 5 minute timeout
-        select = Select(
-            placeholder="Choose tags for your question...",
-            min_values=0,
-            max_values=min(len(available_tags), 5),
-            options=[discord.SelectOption(label=tag.name, value=str(tag.id)) for tag in available_tags]
-        )
-        
-        selected_tags = []
-        
-        async def select_callback(interaction):
-            selected_tags.clear()
-            selected_tags.extend([discord.Object(id=int(tag_id)) for tag_id in select.values])
-            await interaction.response.send_message(
-                f"Selected tags: {', '.join(tag.name for tag in available_tags if str(tag.id) in select.values)}",
-                ephemeral=True
-            )
-        
-        select.callback = select_callback
-        view.add_item(select)
-        
-        done_button = Button(label="Done", style=discord.ButtonStyle.green)
-        
-        async def done_callback(interaction):
-            view.stop()
-            await interaction.response.defer()
-        
-        done_button.callback = done_callback
-        view.add_item(done_button)
-        
-        await message.reply("Please select tags for your question:", view=view)
-        await view.wait()
-        
-        return selected_tags
-
-    # Get tags and post the question
-    tags = await get_question_tags()
+    # Use passed tags instead of asking again
     await post_question(tags)
 
 @bot.event
 async def on_ready():
-    """
-    Called when the client is done preparing the data received from Discord.
-    Prints message on terminal when bot successfully connects to discord.
-    """
+    """Called when the client is done preparing the data received from Discord."""
     logger.info(f"{bot.user} has connected to Discord!")
-
-    # Fetch the response channel
     response_channel = bot.get_channel(response_channel_id)
     
     if response_channel is None:
         logger.error(f"Could not find response channel with ID {response_channel_id}")
         return
 
-    logger.info(f"Channel found: {response_channel.name} (ID: {response_channel.id}, Type: {type(response_channel)})")
-
     if isinstance(response_channel, discord.ForumChannel):
         logger.info(f"Fetching threads from forum channel: {response_channel.name}")
         
-        # Fetch all active threads in the forum channel
+        # Clear existing dictionary
+        previous_questions.clear()
+        
         try:
-            # Fetch active threads
-            for thread in response_channel.threads:
-                async for message in thread.history(limit=None):  # Fetch all messages in the thread
-                    if not message.author.bot:  # Ignore messages from bots
-                        previous_questions.append(message.content)  # Add the question to the list
-                        logger.info("Added to previous questions: %s", message.content)  # Debugging line
-
+            # Get all threads (both active and archived)
+            all_threads = []
+            all_threads.extend(response_channel.threads)  # Active threads
+            
             # Fetch archived threads
-            async for thread in response_channel.archived_threads():  # Iterate over the async generator
-                async for message in thread.history(limit=None):  # Fetch all messages in the thread
-                    if not message.author.bot:  # Ignore messages from bots
-                        previous_questions.append(message.content)  # Add the question to the list
-                        logger.info("Added to previous questions: %s", message.content)  # Debugging line
+            async for archived_thread in response_channel.archived_threads():
+                all_threads.append(archived_thread)
+            
+            logger.info(f"Found {len(all_threads)} total threads")
+            
+            # Process all threads
+            for thread in all_threads:
+                try:
+                    # Get the first message in each thread
+                    async for message in thread.history(limit=1, oldest_first=True):
+                        if not message.author.bot:
+                            # Store question for each tag
+                            for tag in thread.applied_tags:
+                                if tag.id not in previous_questions:
+                                    previous_questions[tag.id] = []
+                                previous_questions[tag.id].append((thread.name, thread.id))
+                                logger.info(f"Added question to tag {tag.name}: {thread.name}")
+                            break
+                except Exception as thread_error:
+                    logger.error(f"Error processing thread {thread.name}: {thread_error}")
+
+            # Log summary of loaded questions
+            logger.info("Summary of loaded questions:")
+            for tag_id, questions in previous_questions.items():
+                tag = discord.utils.get(response_channel.available_tags, id=tag_id)
+                if tag:
+                    logger.info(f"Tag {tag.name}: {len(questions)} questions")
+                    for q, tid in questions:
+                        logger.info(f"  - {q} (Thread ID: {tid})")
 
         except Exception as e:
             logger.error(f"Error fetching messages from forum channel: {e}")
@@ -204,8 +241,13 @@ async def on_message(message: discord.Message):
 
     logger.info("Received message from %s: %s", message.author, message.content)
 
-    # Step 1: Check for similar questions first
-    similar_questions = find_similar_questions(message.content)
+    # Get tags first
+    tags = await get_question_tags(message)
+    if not tags:
+        return
+
+    # Step 1: Check for similar questions with the selected tags
+    similar_questions = find_similar_questions(message.content, message, tags=tags)
     
     if similar_questions:
         view = View(timeout=300)
@@ -228,7 +270,7 @@ async def on_message(message: discord.Message):
 
                 async def post_callback(interaction):
                     await interaction.response.defer()
-                    await post_question_flow(message, answer_response)
+                    await post_question_flow(message, answer_response, tags)
 
                 async def dont_post_callback(interaction):
                     await interaction.response.send_message("Okay, I won't post your question.", ephemeral=True)
@@ -241,7 +283,7 @@ async def on_message(message: discord.Message):
                 await message.reply("Do you still want to post your question?", view=post_view)
             else:
                 # If no answer, just proceed with posting
-                await post_question_flow(message)
+                await post_question_flow(message, answer_response, tags)
         
         async def cancel_callback(interaction):
             await interaction.response.send_message("Okay, I won't proceed with your question.", ephemeral=True)
@@ -250,11 +292,22 @@ async def on_message(message: discord.Message):
         cancel_button.callback = cancel_callback
         view.add_item(continue_button)
         view.add_item(cancel_button)
+
+
         
         # Show similar questions and ask if they want to continue
-        similar_questions_text = "\n".join([f"• {q}" for q in similar_questions])
+        embed = discord.Embed(title="I found some similar questions:", color=discord.Color.blue())
+
+        for question, thread_url in similar_questions:
+            embed.add_field(
+                name="Similar Question",
+                value=f"{question}\n[View Thread]({thread_url})",
+                inline=False
+            )
+
         await message.reply(
-            f"I found some similar questions:\n{similar_questions_text}\n\nWould you like to continue with your question?",
+            "I found some similar questions. Would you like to continue with your question?",
+            embed=embed,
             view=view
         )
     else:
@@ -272,7 +325,7 @@ async def on_message(message: discord.Message):
 
             async def post_callback(interaction):
                 await interaction.response.defer()
-                await post_question_flow(message, answer_response)
+                await post_question_flow(message, answer_response, tags)
 
             async def dont_post_callback(interaction):
                 await interaction.response.send_message("Okay, I won't post your question.", ephemeral=True)
@@ -285,7 +338,7 @@ async def on_message(message: discord.Message):
             await message.reply("Do you want to post your question?", view=post_view)
         else:
             # If no answer, just proceed with posting
-            await post_question_flow(message)
+            await post_question_flow(message, answer_response, tags)
 
 
 
