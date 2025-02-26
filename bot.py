@@ -40,7 +40,7 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 probe_and_answer_agent = ProbeAndAnswerAgent()
 
 # At the top with other constants
-# response_channel_id = 1337581994648932363
+response_channel_id = 1337581994648932363
 guild_id = 1326353542037901352
 rankings_channel_id = 1337904418603008051
 questions_channel = None
@@ -87,7 +87,7 @@ def find_similar_questions(new_question, message, tags=None, threshold=0.6):
     ]
     similar.sort(key=lambda x: x[1], reverse=True)
 
-    guild_id = message.guild.id if hasattr(message, 'guild') else None
+    # guild_id = message.guild.id if message.guild and hasattr(message, 'guild') else None
     # Return both the question text and the formatted link
     return [(q, f"https://discord.com/channels/{guild_id}/{tid}") for q, score, tid in similar[:5]]
 
@@ -314,6 +314,14 @@ async def on_message(message: discord.Message):
     # Ignore bot messages and commands
     if message.author.bot or message.content.startswith("!"):
         return
+    
+    # ignore messages that are not DMs
+    if message.guild:
+        return
+    
+    # explicitly ignore messages that are in the response channel
+    # if message.channel.id == response_channel_id:
+    #     return
 
     # logger.info("Received message from %s: %s", message.author, message.content)
 
