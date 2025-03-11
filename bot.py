@@ -155,8 +155,6 @@ def format_first_message(author: discord.Member, content: str, answer_response: 
     post_content = f"**by {author.mention}**"  # must be formatted this way alone for later parsing
     if len(content) > 100:
         post_content += f"\n\n**Full question:**\n{content}"
-    if answer_response and answer_response.lower() != "no":
-        post_content += f"\n\n**AI-Generated Answer:**\n{answer_response}"
     return post_content
 
 
@@ -287,6 +285,14 @@ async def on_message(message: discord.Message):
     """
     await bot.process_commands(message)
 
+    def ai_has_answer(answer_response):
+        if not answer_response:
+            return False
+        if answer_response.lower().strip() in ["no", "no.", "no!", "no?", "no..", "no..."]:
+            return False
+        
+        return True
+
     async def confirm_post_with_ai():
         # Step 3: If there's an answer, display it and ask if they want to post
         # await message.reply(f"Here's what I found online: {answer_response}")
@@ -348,7 +354,7 @@ async def on_message(message: discord.Message):
                 await message.reply("Error: Something went wrong. We could not answer your question.")
                 return
             
-            if answer_response.lower() != "no":
+            if ai_has_answer(answer_response):
                 confirm_post_with_ai()
             else:
                 # If no answer, just proceed with posting
@@ -383,7 +389,7 @@ async def on_message(message: discord.Message):
         # If no similar questions, proceed to check if agent can answer
         answer_response = await probe_and_answer_agent.run(message)
         
-        if answer_response.lower() != "no":
+        if ai_has_answer(answer_response):
             # If there's an answer, display it and ask if they want to post
             # await message.reply(f"Here's what I found online: {answer_response}")
             
